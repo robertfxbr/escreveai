@@ -192,6 +192,43 @@ class TranscriberTests(unittest.TestCase):
             self.assertIn("Aula 01 Introdução", result.saved[0].name)
             self.assertIn("# Aula 01: Introdução", result.saved[0].read_text(encoding="utf-8"))
 
+    def test_rerun_recognizes_transcript_kept_under_legacy_note_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            url = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+            legacy = folder / "lecture_1.md"
+            legacy.write_text(
+                f"# Aula 1\n\n**Fonte:** {url}\n\n## Transcrição\n\n"
+                "[00:00:00](https://www.youtube.com/watch?v=aaaaaaaaaaa&t=0s) Fala completa.\n",
+                encoding="utf-8",
+            )
+            result = transcribe_url(
+                url, folder, status=lambda _: None, visual_mode=True,
+                api_key="fake-test-key",
+                caption_fetcher=lambda *_: self.fail("Não deve buscar legendas de novo"),
+                visual_analyzer=lambda *_: "[00:30] Gráfico na tela.",
+            )
+            self.assertEqual(result.saved, [legacy])
+            self.assertEqual(len(list(folder.glob("*.md"))), 1)
+            self.assertIn("## Contexto visual", legacy.read_text(encoding="utf-8"))
+
+    def test_plain_rerun_skips_existing_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            url = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+            existing = folder / "lecture_1.md"
+            existing.write_text(
+                f"# Aula 1\n\n**Fonte:** {url}\n\n## Transcrição\n\nFala completa.\n",
+                encoding="utf-8",
+            )
+            result = transcribe_url(
+                url, folder, status=lambda _: None,
+                caption_fetcher=lambda *_: self.fail("Não deve buscar legendas de novo"),
+            )
+            self.assertEqual(result.saved, [existing])
+            self.assertEqual(result.skipped, [existing])
+            self.assertEqual(len(list(folder.glob("*.md"))), 1)
+
     def test_visual_mode_adds_context_and_skips_completed_video_on_rerun(self):
         with tempfile.TemporaryDirectory() as directory:
             video_url = "https://www.youtube.com/watch?v=aaaaaaaaaaa"

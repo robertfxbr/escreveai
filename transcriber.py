@@ -301,7 +301,21 @@ def transcribe_video(
 def existing_transcript(output_dir: Path, video_id: str) -> Path | None:
     ending = re.compile(rf"\[{re.escape(video_id)}\](?: \(\d+\))?\.md$")
     files = [path for path in output_dir.glob("*.md") if ending.search(path.name)]
-    return max(files, key=lambda path: path.stat().st_mtime) if files else None
+    if files:
+        return max(files, key=lambda path: path.stat().st_mtime)
+    source = re.compile(
+        rf"^\*\*Fonte:\*\* https://www\.youtube\.com/watch\?v={re.escape(video_id)}(?:\s|&|$)",
+        re.MULTILINE,
+    )
+    for path in output_dir.glob("*.md"):
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                header = file.read(1024)
+        except (OSError, UnicodeError):
+            continue
+        if source.search(header) and "## Transcrição" in header:
+            return path
+    return None
 
 
 def visual_notes_to_markdown(notes: str, video_id: str) -> str:
@@ -412,16 +426,16 @@ def transcribe_url(
     for index, video in enumerate(urls, 1):
         video_url = video.url if isinstance(video, PlaylistVideo) else video
         title_hint = video.title if isinstance(video, PlaylistVideo) else None
-        if visual_mode:
-            prior = existing_transcript(Path(output_dir), video_id_from_url(video_url))
-            if prior and "\n## Contexto visual\n" in prior.read_text(encoding="utf-8"):
-                saved.append(prior)
-                skipped.append(prior)
+        prior = existing_transcript(Path(output_dir), video_id_from_url(video_url))
+        if prior and (not visual_mode or "\n## Contexto visual\n" in prior.read_text(encoding="utf-8")):
+            saved.append(prior)
+            skipped.append(prior)
+            if visual_mode:
                 (Path(output_dir) / f".escreveai-vision-{video_id_from_url(video_url)}.json").unlink(
                     missing_ok=True
                 )
-                report(f"Vídeo {index}/{len(urls)}: contexto visual já concluído; pulando.")
-                continue
+            report(f"Vídeo {index}/{len(urls)}: já concluído; pulando.")
+            continue
         if max_new_videos and attempted >= max_new_videos:
             report(f"Limite de {max_new_videos} vídeo(s) novos atingido nesta execução.")
             break
