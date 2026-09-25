@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 from html import unescape
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 from urllib.parse import parse_qs, urlparse
@@ -27,6 +28,7 @@ class VideoInfo:
 class BatchResult:
     saved: list[Path]
     failed: list[tuple[str, str]]
+    skipped: list[Path] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -46,14 +48,20 @@ def validate_youtube_url(url: str) -> str:
         raise ValueError("Cole um link válido de vídeo do YouTube.")
     parts = [part for part in parsed.path.split("/") if part]
     playlist_id = parse_qs(parsed.query).get("list", [""])[0]
+    video_id = parse_qs(parsed.query).get("v", [""])[0]
+    safe_video_id = lambda value: bool(re.fullmatch(r"[A-Za-z0-9_-]{1,32}", value))
+    safe_playlist_id = lambda value: bool(re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value))
     if host.endswith("youtu.be"):
-        valid = len(parts) == 1
+        valid = len(parts) == 1 and safe_video_id(parts[0])
     elif parsed.path == "/playlist":
-        valid = bool(playlist_id)
+        valid = safe_playlist_id(playlist_id)
     elif parsed.path == "/watch":
-        valid = bool(parse_qs(parsed.query).get("v", [""])[0] or playlist_id)
+        valid = safe_video_id(video_id) or safe_playlist_id(playlist_id)
     else:
-        valid = len(parts) == 2 and parts[0] in {"shorts", "live", "embed"}
+        valid = (
+            len(parts) == 2 and parts[0] in {"shorts", "live", "embed"}
+            and safe_video_id(parts[1])
+        )
     if not valid:
         raise ValueError("O link deve apontar para um único vídeo do YouTube.")
     return url
@@ -290,6 +298,91 @@ def transcribe_video(
     raise RuntimeError("Há arquivos demais com esse título na pasta selecionada.")
 
 
+def existing_transcript(output_dir: Path, video_id: str) -> Path | None:
+    ending = re.compile(rf"\[{re.escape(video_id)}\](?: \(\d+\))?\.md$")
+    files = [path for path in output_dir.glob("*.md") if ending.search(path.name)]
+    return max(files, key=lambda path: path.stat().st_mtime) if files else None
+
+
+def visual_notes_to_markdown(notes: str, video_id: str) -> str:
+    notes = notes.strip()
+    if not notes:
+        raise ValueError("A análise visual não retornou observações.")
+
+    def link_stamp(match: re.Match[str]) -> str:
+        stamp = match.group(1)
+        parts = [int(part) for part in stamp.split(":")]
+        if len(parts) == 2:
+            minutes, seconds = parts
+            total = minutes * 60 + seconds
+        else:
+            hours, minutes, seconds = parts
+            total = hours * 3600 + minutes * 60 + seconds
+        if seconds >= 60 or (len(parts) == 3 and minutes >= 60):
+            return match.group(0)
+        return f"[{format_timestamp(total)}](https://www.youtube.com/watch?v={video_id}&t={total}s)"
+
+    body = re.sub(r"\[(\d{1,2}:\d{2}(?::\d{2})?)\](?!\()", link_stamp, notes)
+    return (
+        "\n\n## Contexto visual\n\n"
+        "> Observações automáticas sobre o que aparece na tela; confira os detalhes no vídeo.\n\n"
+        f"{body}\n"
+    )
+
+
+def transcribe_with_vision(
+    url: str,
+    output_dir: Path,
+    model_name: str,
+    report: Status,
+    *,
+    visual_analyzer: Callable | None,
+    api_key: str | None,
+    caption_fetcher: Callable | None,
+    downloader: Callable | None,
+    transcriber: Callable | None,
+    force_whisper: bool,
+    remove_fillers: bool,
+    title_hint: str | None,
+) -> Path:
+    key = api_key or os.environ.get("GEMINI_API_KEY")
+    if visual_analyzer is None and not key:
+        raise ValueError("Defina GEMINI_API_KEY ou informe a chave no app para usar contexto visual.")
+    video_id = video_id_from_url(url)
+    existing = existing_transcript(output_dir, video_id)
+    if existing is None:
+        existing = transcribe_video(
+            url, output_dir, model_name, report,
+            caption_fetcher=caption_fetcher, downloader=downloader,
+            transcriber=transcriber, force_whisper=force_whisper,
+            remove_fillers=remove_fillers, title_hint=title_hint,
+        )
+    content = existing.read_text(encoding="utf-8")
+    if "\n## Contexto visual\n" in content:
+        report(f"Contexto visual já concluído para {video_id}; pulando.")
+        return existing
+
+    if visual_analyzer is None:
+        from vision import analyze_with_gemini
+        visual_analyzer = analyze_with_gemini
+    report(f"Analisando imagens do vídeo {video_id}...")
+    notes = visual_analyzer(url, output_dir, report, key)
+    addition = visual_notes_to_markdown(notes, video_id)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", newline="\n", suffix=".tmp",
+        prefix="escreveai-", dir=output_dir, delete=False,
+    ) as file:
+        temporary = Path(file.name)
+        file.write(content.rstrip() + "\n" + addition)
+    try:
+        os.replace(temporary, existing)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    (output_dir / f".escreveai-vision-{video_id}.json").unlink(missing_ok=True)
+    return existing
+
+
 def transcribe_url(
     url: str,
     output_dir: Path,
@@ -302,28 +395,58 @@ def transcribe_url(
     transcriber: Callable | None = None,
     force_whisper: bool = False,
     remove_fillers: bool = False,
+    visual_mode: bool = False,
+    visual_analyzer: Callable | None = None,
+    api_key: str | None = None,
+    max_new_videos: int | None = None,
 ) -> BatchResult:
     url = validate_youtube_url(url)
+    if max_new_videos is not None and max_new_videos < 0:
+        raise ValueError("O limite de vídeos deve ser zero ou maior.")
     report = status or (lambda _: None)
     urls = (playlist_fetcher or fetch_playlist_urls)(url, report) if is_playlist_url(url) else [url]
     saved: list[Path] = []
     failed: list[tuple[str, str]] = []
+    skipped: list[Path] = []
+    attempted = 0
     for index, video in enumerate(urls, 1):
         video_url = video.url if isinstance(video, PlaylistVideo) else video
         title_hint = video.title if isinstance(video, PlaylistVideo) else None
+        if visual_mode:
+            prior = existing_transcript(Path(output_dir), video_id_from_url(video_url))
+            if prior and "\n## Contexto visual\n" in prior.read_text(encoding="utf-8"):
+                saved.append(prior)
+                skipped.append(prior)
+                (Path(output_dir) / f".escreveai-vision-{video_id_from_url(video_url)}.json").unlink(
+                    missing_ok=True
+                )
+                report(f"Vídeo {index}/{len(urls)}: contexto visual já concluído; pulando.")
+                continue
+        if max_new_videos and attempted >= max_new_videos:
+            report(f"Limite de {max_new_videos} vídeo(s) novos atingido nesta execução.")
+            break
+        attempted += 1
         report(f"Vídeo {index}/{len(urls)}: iniciando...")
         try:
-            path = transcribe_video(
-                video_url, output_dir, model_name, report,
-                caption_fetcher=caption_fetcher, downloader=downloader,
-                transcriber=transcriber, force_whisper=force_whisper,
-                remove_fillers=remove_fillers,
-                title_hint=title_hint,
-            )
+            if visual_mode:
+                path = transcribe_with_vision(
+                    video_url, Path(output_dir), model_name, report,
+                    visual_analyzer=visual_analyzer, api_key=api_key,
+                    caption_fetcher=caption_fetcher, downloader=downloader,
+                    transcriber=transcriber, force_whisper=force_whisper,
+                    remove_fillers=remove_fillers, title_hint=title_hint,
+                )
+            else:
+                path = transcribe_video(
+                    video_url, output_dir, model_name, report,
+                    caption_fetcher=caption_fetcher, downloader=downloader,
+                    transcriber=transcriber, force_whisper=force_whisper,
+                    remove_fillers=remove_fillers, title_hint=title_hint,
+                )
         except Exception as exc:
             failed.append((video_url, str(exc)))
             report(f"Vídeo {index}/{len(urls)}: falhou — {exc}")
         else:
             saved.append(path)
             report(f"Vídeo {index}/{len(urls)}: salvo em {path.name}")
-    return BatchResult(saved, failed)
+    return BatchResult(saved, failed, skipped)

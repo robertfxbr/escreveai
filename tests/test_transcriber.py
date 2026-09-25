@@ -27,6 +27,8 @@ class TranscriberTests(unittest.TestCase):
         for url in (
             "https://youtube.com/playlist",
             "https://youtube.com.evil.test/watch?v=abc",
+            "https://youtube.com/watch?v=abc%2F..%2F..%2Fevil",
+            "https://youtu.be/abc%2F..%2F..%2Fevil",
             "file:///secret",
             "not a url",
         ):
@@ -189,6 +191,97 @@ class TranscriberTests(unittest.TestCase):
             )
             self.assertIn("Aula 01 Introdução", result.saved[0].name)
             self.assertIn("# Aula 01: Introdução", result.saved[0].read_text(encoding="utf-8"))
+
+    def test_visual_mode_adds_context_and_skips_completed_video_on_rerun(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video_url = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+            calls = []
+
+            def captions(url, status):
+                calls.append("captions")
+                return VideoInfo("Aula", url, "aaaaaaaaaaa", 120), [
+                    SimpleNamespace(start=0, text="Veja o gráfico.")
+                ]
+
+            def vision(url, folder, status, api_key):
+                calls.append("vision")
+                return "[00:30] Gráfico mostra crescimento de 10 para 20."
+
+            kwargs = dict(
+                caption_fetcher=captions,
+                visual_analyzer=vision,
+                visual_mode=True,
+                api_key="fake-test-key",
+            )
+            first = transcribe_url(video_url, Path(directory), status=lambda _: None, **kwargs)
+            second = transcribe_url(video_url, Path(directory), status=lambda _: None, **kwargs)
+            self.assertEqual(first.saved, second.saved)
+            self.assertEqual(calls, ["captions", "vision"])
+            content = first.saved[0].read_text(encoding="utf-8")
+            self.assertIn("Veja o gráfico.", content)
+            self.assertIn("## Contexto visual", content)
+            self.assertIn("[00:00:30](https://www.youtube.com/watch?v=aaaaaaaaaaa&t=30s)", content)
+            self.assertEqual(len(list(Path(directory).glob("*.md"))), 1)
+
+    def test_visual_error_keeps_transcript_and_rerun_enriches_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video_url = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+            calls = []
+
+            def captions(url, status):
+                calls.append("captions")
+                return VideoInfo("Aula", url, "aaaaaaaaaaa", 120), [
+                    SimpleNamespace(start=0, text="Transcrição preservada.")
+                ]
+
+            failed = transcribe_url(
+                video_url, Path(directory), status=lambda _: None,
+                caption_fetcher=captions, visual_mode=True, api_key="fake-test-key",
+                visual_analyzer=lambda *_: (_ for _ in ()).throw(RuntimeError("API indisponível")),
+            )
+            self.assertEqual(len(failed.failed), 1)
+            files = list(Path(directory).glob("*.md"))
+            self.assertEqual(len(files), 1)
+            self.assertIn("Transcrição preservada.", files[0].read_text(encoding="utf-8"))
+
+            resumed = transcribe_url(
+                video_url, Path(directory), status=lambda _: None,
+                caption_fetcher=captions, visual_mode=True, api_key="fake-test-key",
+                visual_analyzer=lambda *_: "[00:30] Um gráfico.",
+            )
+            self.assertEqual(resumed.saved, files)
+            self.assertEqual(calls, ["captions"])
+
+    def test_visual_playlist_limit_resumes_next_video_on_rerun(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ids = ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"]
+            urls = [f"https://www.youtube.com/watch?v={video_id}" for video_id in ids]
+            analyzed = []
+
+            def captions(url, status):
+                video_id = url.split("v=")[1]
+                return VideoInfo("Aula", url, video_id, 120), [
+                    SimpleNamespace(start=0, text="Texto")
+                ]
+
+            def vision(url, folder, status, api_key):
+                analyzed.append(url)
+                return "[00:30] Slide na tela."
+
+            kwargs = dict(
+                playlist_fetcher=lambda *_: urls,
+                caption_fetcher=captions,
+                visual_analyzer=vision,
+                visual_mode=True,
+                api_key="fake-test-key",
+                max_new_videos=1,
+            )
+            first = transcribe_url("https://youtube.com/playlist?list=PLabc", Path(directory), **kwargs)
+            second = transcribe_url("https://youtube.com/playlist?list=PLabc", Path(directory), **kwargs)
+            self.assertEqual(len(first.saved), 1)
+            self.assertEqual(len(second.saved), 2)
+            self.assertEqual(len(second.skipped), 1)
+            self.assertEqual(analyzed, urls[:2])
 
 
 if __name__ == "__main__":

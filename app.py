@@ -16,8 +16,8 @@ class TranscriptionApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("YouTube para Markdown")
-        self.root.geometry("660x440")
-        self.root.minsize(560, 420)
+        self.root.geometry("660x560")
+        self.root.minsize(560, 530)
         self.root.configure(bg="#f5f7fb")
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.url = tk.StringVar()
@@ -25,6 +25,9 @@ class TranscriptionApp:
         self.model = tk.StringVar(value="small")
         self.force_whisper = tk.BooleanVar(value=False)
         self.remove_fillers = tk.BooleanVar(value=False)
+        self.visual_mode = tk.BooleanVar(value=False)
+        self.api_key = tk.StringVar()
+        self.visual_limit = tk.IntVar(value=3)
         self.status = tk.StringVar(value="Pronto para transcrever.")
         self.result_path: Path | None = None
         self._build()
@@ -80,6 +83,20 @@ class TranscriptionApp:
             main, text="Remover cacoetes iniciais comuns", variable=self.remove_fillers,
         )
         self.fillers_checkbox.pack(anchor="w", pady=(3, 0))
+        self.visual_checkbox = ttk.Checkbutton(
+            main, text="Adicionar contexto visual com Gemini (opcional)", variable=self.visual_mode,
+        )
+        self.visual_checkbox.pack(anchor="w", pady=(3, 0))
+        ttk.Label(main, text="Chave Gemini API (ou defina GEMINI_API_KEY)", style="Hint.TLabel").pack(
+            anchor="w", pady=(8, 2)
+        )
+        self.key_entry = ttk.Entry(main, textvariable=self.api_key, show="•")
+        self.key_entry.pack(fill="x")
+        limit_row = ttk.Frame(main)
+        limit_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(limit_row, text="Vídeos novos por execução (modo visual)", style="Hint.TLabel").pack(side="left")
+        self.limit_box = ttk.Spinbox(limit_row, from_=1, to=100, textvariable=self.visual_limit, width=5)
+        self.limit_box.pack(side="left", padx=(9, 0))
 
         actions = ttk.Frame(main)
         actions.pack(fill="x", pady=(23, 12))
@@ -108,6 +125,14 @@ class TranscriptionApp:
         if not self.folder.get().strip() or not folder.is_dir():
             messagebox.showerror("Pasta ausente", "Selecione uma pasta de destino existente.", parent=self.root)
             return
+        if self.visual_mode.get() and not (self.api_key.get().strip() or os.environ.get("GEMINI_API_KEY")):
+            messagebox.showerror(
+                "Chave ausente", "Informe uma chave Gemini API ou defina GEMINI_API_KEY.", parent=self.root,
+            )
+            return
+        if self.visual_mode.get() and self.visual_limit.get() < 1:
+            messagebox.showerror("Limite inválido", "Use pelo menos 1 vídeo por execução.", parent=self.root)
+            return
         self.result_path = None
         self.open_button.configure(state="disabled")
         self.start_button.configure(state="disabled")
@@ -115,21 +140,32 @@ class TranscriptionApp:
         self.model_box.configure(state="disabled")
         self.whisper_checkbox.configure(state="disabled")
         self.fillers_checkbox.configure(state="disabled")
+        self.visual_checkbox.configure(state="disabled")
+        self.key_entry.configure(state="disabled")
+        self.limit_box.configure(state="disabled")
         self.progress.start(12)
         self.status.set("Iniciando...")
         threading.Thread(
             target=self._run,
-            args=(url, folder, self.model.get(), self.force_whisper.get(), self.remove_fillers.get()),
+            args=(url, folder, self.model.get(), self.force_whisper.get(),
+                  self.remove_fillers.get(), self.visual_mode.get(), self.api_key.get().strip(),
+                  self.visual_limit.get()),
             daemon=True,
         ).start()
 
-    def _run(self, url: str, folder: Path, model: str, force_whisper: bool, remove_fillers: bool) -> None:
+    def _run(
+        self, url: str, folder: Path, model: str, force_whisper: bool,
+        remove_fillers: bool, visual_mode: bool, api_key: str, visual_limit: int,
+    ) -> None:
         try:
             result = transcribe_url(
                 url, folder, model,
                 lambda message: self.events.put(("status", message)),
                 force_whisper=force_whisper,
                 remove_fillers=remove_fillers,
+                visual_mode=visual_mode,
+                api_key=api_key,
+                max_new_videos=visual_limit if visual_mode else None,
             )
         except Exception as exc:
             self.events.put(("error", str(exc)))
@@ -152,7 +188,11 @@ class TranscriptionApp:
                     if result.saved:
                         self.result_path = result.saved[0] if len(result.saved) == 1 else result.saved[0].parent
                         self.open_button.configure(state="normal")
-                    summary = f"{len(result.saved)} arquivo(s) salvos; {len(result.failed)} falha(s)."
+                    new_count = len(result.saved) - len(result.skipped)
+                    summary = (
+                        f"{new_count} novo(s); {len(result.skipped)} já pronto(s); "
+                        f"{len(result.failed)} falha(s)."
+                    )
                     self.status.set(summary)
                     if result.failed:
                         details = "\n".join(f"{url}: {error}" for url, error in result.failed[:5])
@@ -170,6 +210,9 @@ class TranscriptionApp:
         self.model_box.configure(state="readonly")
         self.whisper_checkbox.configure(state="normal")
         self.fillers_checkbox.configure(state="normal")
+        self.visual_checkbox.configure(state="normal")
+        self.key_entry.configure(state="normal")
+        self.limit_box.configure(state="normal")
 
     def _open_result(self) -> None:
         if self.result_path and self.result_path.exists():

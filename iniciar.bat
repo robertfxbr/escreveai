@@ -5,7 +5,7 @@ if not exist ".venv\Scripts\python.exe" (
     python -m venv .venv
     if errorlevel 1 goto :error
 )
-".venv\Scripts\python.exe" -m pip install -r requirements.txt
+".venv\Scripts\python.exe" -m pip install -r requirements-vision.txt
 if errorlevel 1 goto :error
 ".venv\Scripts\python.exe" app.py
 if errorlevel 1 goto :error
