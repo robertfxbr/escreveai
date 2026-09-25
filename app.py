@@ -16,12 +16,13 @@ class TranscriptionApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("YouTube para Markdown")
-        self.root.geometry("660x560")
-        self.root.minsize(560, 530)
+        self.root.geometry("660x620")
+        self.root.minsize(560, 590)
         self.root.configure(bg="#f5f7fb")
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.url = tk.StringVar()
         self.folder = tk.StringVar()
+        self.cookies = tk.StringVar()
         self.model = tk.StringVar(value="small")
         self.force_whisper = tk.BooleanVar(value=False)
         self.remove_fillers = tk.BooleanVar(value=False)
@@ -64,6 +65,14 @@ class TranscriptionApp:
         ttk.Entry(folder_row, textvariable=self.folder).pack(side="left", fill="x", expand=True)
         self.browse_button = ttk.Button(folder_row, text="Selecionar...", command=self._choose_folder)
         self.browse_button.pack(side="left", padx=(8, 0))
+
+        ttk.Label(main, text="Cookies do YouTube (opcional, para vídeos que exigem login)").pack(anchor="w")
+        cookie_row = ttk.Frame(main)
+        cookie_row.pack(fill="x", pady=(5, 16))
+        self.cookie_entry = ttk.Entry(cookie_row, textvariable=self.cookies)
+        self.cookie_entry.pack(side="left", fill="x", expand=True)
+        self.cookie_browse_button = ttk.Button(cookie_row, text="Selecionar...", command=self._choose_cookies)
+        self.cookie_browse_button.pack(side="left", padx=(8, 0))
 
         options = ttk.Frame(main)
         options.pack(fill="x")
@@ -116,6 +125,14 @@ class TranscriptionApp:
         if chosen:
             self.folder.set(chosen)
 
+    def _choose_cookies(self) -> None:
+        chosen = filedialog.askopenfilename(
+            parent=self.root, title="Selecione o cookies.txt do YouTube",
+            filetypes=(("Arquivos de texto", "*.txt"), ("Todos os arquivos", "*.*")),
+        )
+        if chosen:
+            self.cookies.set(chosen)
+
     def _start(self) -> None:
         url = self.url.get().strip()
         folder = Path(self.folder.get().strip())
@@ -124,6 +141,10 @@ class TranscriptionApp:
             return
         if not self.folder.get().strip() or not folder.is_dir():
             messagebox.showerror("Pasta ausente", "Selecione uma pasta de destino existente.", parent=self.root)
+            return
+        cookie_file = self.cookies.get().strip()
+        if cookie_file and not Path(cookie_file).is_file():
+            messagebox.showerror("Cookies ausentes", "Selecione um arquivo cookies.txt existente.", parent=self.root)
             return
         if self.visual_mode.get() and not (self.api_key.get().strip() or os.environ.get("GEMINI_API_KEY")):
             messagebox.showerror(
@@ -137,6 +158,8 @@ class TranscriptionApp:
         self.open_button.configure(state="disabled")
         self.start_button.configure(state="disabled")
         self.browse_button.configure(state="disabled")
+        self.cookie_entry.configure(state="disabled")
+        self.cookie_browse_button.configure(state="disabled")
         self.model_box.configure(state="disabled")
         self.whisper_checkbox.configure(state="disabled")
         self.fillers_checkbox.configure(state="disabled")
@@ -149,14 +172,18 @@ class TranscriptionApp:
             target=self._run,
             args=(url, folder, self.model.get(), self.force_whisper.get(),
                   self.remove_fillers.get(), self.visual_mode.get(), self.api_key.get().strip(),
-                  self.visual_limit.get()),
+                  self.visual_limit.get(), cookie_file),
             daemon=True,
         ).start()
 
     def _run(
         self, url: str, folder: Path, model: str, force_whisper: bool,
         remove_fillers: bool, visual_mode: bool, api_key: str, visual_limit: int,
+        cookie_file: str,
     ) -> None:
+        previous_cookies = os.environ.get("YOUTUBE_COOKIES_FILE")
+        if cookie_file:
+            os.environ["YOUTUBE_COOKIES_FILE"] = cookie_file
         try:
             result = transcribe_url(
                 url, folder, model,
@@ -171,6 +198,12 @@ class TranscriptionApp:
             self.events.put(("error", str(exc)))
         else:
             self.events.put(("done", result))
+        finally:
+            if cookie_file:
+                if previous_cookies is None:
+                    os.environ.pop("YOUTUBE_COOKIES_FILE", None)
+                else:
+                    os.environ["YOUTUBE_COOKIES_FILE"] = previous_cookies
 
     def _process_events(self) -> None:
         try:
@@ -207,6 +240,8 @@ class TranscriptionApp:
         self.progress.stop()
         self.start_button.configure(state="normal")
         self.browse_button.configure(state="normal")
+        self.cookie_entry.configure(state="normal")
+        self.cookie_browse_button.configure(state="normal")
         self.model_box.configure(state="readonly")
         self.whisper_checkbox.configure(state="normal")
         self.fillers_checkbox.configure(state="normal")

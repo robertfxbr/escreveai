@@ -1,11 +1,14 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from transcriber import (
     PlaylistVideo,
     VideoInfo,
+    download_audio,
     format_timestamp,
     is_playlist_url,
     render_markdown,
@@ -16,6 +19,41 @@ from transcriber import (
 
 
 class TranscriberTests(unittest.TestCase):
+    def test_audio_download_uses_cookies_and_retries_alternate_client(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            cookies = folder / "cookies.txt"
+            cookies.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+            attempts = []
+
+            class FakeYoutubeDL:
+                def __init__(self, options):
+                    self.options = options
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    return False
+
+                def extract_info(self, url, download):
+                    attempts.append(self.options)
+                    if len(attempts) == 1:
+                        raise RuntimeError("Login exigido")
+                    Path(self.options["outtmpl"].replace("%(ext)s", "mp4")).write_bytes(b"audio")
+                    return {"id": "aaaaaaaaaaa", "title": "Aula", "duration": 10}
+
+            with patch.dict(os.environ, {"YOUTUBE_COOKIES_FILE": str(cookies)}), \
+                    patch("yt_dlp.YoutubeDL", FakeYoutubeDL):
+                info, audio = download_audio(
+                    "https://www.youtube.com/watch?v=aaaaaaaaaaa", folder, lambda _: None
+                )
+            self.assertEqual(info.video_id, "aaaaaaaaaaa")
+            self.assertEqual(audio.read_bytes(), b"audio")
+            self.assertEqual(len(attempts), 2)
+            self.assertEqual(attempts[0]["cookiefile"], str(cookies))
+            self.assertEqual(attempts[1]["extractor_args"]["youtube"]["player_client"], ["android"])
+
     def test_accepts_video_links_but_rejects_playlists_and_other_hosts(self):
         for url in (
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",

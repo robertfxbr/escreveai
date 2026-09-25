@@ -22,12 +22,18 @@ def main() -> int:
     parser.add_argument("--modelo", choices=("tiny", "base", "small", "medium"), default="small")
     parser.add_argument("--whisper", action="store_true", help="Usar Whisper mesmo quando há legendas")
     parser.add_argument("--limpar-cacoetes", action="store_true", help="Remove cacoetes no início de trechos")
+    parser.add_argument("--cookies", type=Path, help="Arquivo cookies.txt exportado do navegador para vídeos que exigem login")
     parser.add_argument("--visao", action="store_true", help="Adiciona contexto visual com Gemini (GEMINI_API_KEY)")
     parser.add_argument("--limite", type=int, default=3, help="Vídeos novos por execução com --visao (0 = sem limite)")
     args = parser.parse_args()
 
     url = args.url or input("Link do vídeo ou playlist: ").strip()
     folder = args.pasta or Path.cwd()
+    if args.cookies:
+        if not args.cookies.is_file():
+            print("Erro: o arquivo informado em --cookies não existe.")
+            return 1
+        os.environ["YOUTUBE_COOKIES_FILE"] = str(args.cookies.resolve())
     if args.visao and not os.environ.get("GEMINI_API_KEY"):
         print("Erro: defina GEMINI_API_KEY para usar --visao.")
         return 1

@@ -202,13 +202,28 @@ def download_audio(url: str, temp_dir: Path, status: Status) -> tuple[VideoInfo,
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
         "js_runtimes": {"node": {}},
     }
-    with YoutubeDL(options) as ydl:
-        data = ydl.extract_info(url, download=True)
+    cookie_file = os.environ.get("YOUTUBE_COOKIES_FILE")
+    if cookie_file:
+        if not Path(cookie_file).is_file():
+            raise ValueError("O arquivo cookies.txt selecionado não existe.")
+        options["cookiefile"] = cookie_file
+    stem = "audio"
+    try:
+        with YoutubeDL(options) as ydl:
+            data = ydl.extract_info(url, download=True)
+    except Exception:
+        status("Tentando rota alternativa de áudio do YouTube...")
+        options["extractor_args"] = {"youtube": {"player_client": ["android"]}}
+        options["outtmpl"] = str(temp_dir / "audio-fallback.%(ext)s")
+        stem = "audio-fallback"
+        with YoutubeDL(options) as ydl:
+            data = ydl.extract_info(url, download=True)
     if not data or data.get("_type") == "playlist":
         raise ValueError("O link não retornou um vídeo individual.")
-    files = [path for path in temp_dir.glob("audio.*") if path.is_file() and not path.name.endswith(".part")]
+    files = [path for path in temp_dir.glob(f"{stem}.*") if path.is_file() and not path.name.endswith(".part")]
     if len(files) != 1:
         raise RuntimeError("Não foi possível localizar o áudio baixado.")
     info = VideoInfo(
