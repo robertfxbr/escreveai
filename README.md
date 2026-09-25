@@ -1,0 +1,34 @@
+# YouTube para Markdown
+
+App local para transcrever vídeos ou playlists do YouTube e salvar um Markdown por vídeo na pasta escolhida. Pode ser usado pela janela ou pelo terminal.
+
+## Iniciar no Windows
+
+1. Tenha Python 3.10 ou superior e Node.js instalados. Deixe os dois disponíveis no `PATH`. FFmpeg também é recomendado para formatos de áudio que precisam de pós-processamento.
+2. Dê dois cliques em `iniciar.bat`. Na primeira execução, o script cria `.venv` e instala as dependências.
+3. Cole o link de um vídeo ou playlist, selecione a pasta e clique em **Transcrever**.
+
+## Usar pelo terminal
+
+Após executar `iniciar.bat` uma vez para instalar as dependências:
+
+```powershell
+.\.venv\Scripts\python.exe transcrever.py "https://www.youtube.com/playlist?list=ID_DA_PLAYLIST" --pasta "C:\Caminho\Das\Notas"
+```
+
+Para um vídeo só, passe o link dele no lugar da playlist. Sem argumentos, o comando pede o link e salva na pasta atual. Use `--whisper` para transcrever diretamente o áudio, mesmo quando existem legendas. Use `--modelo tiny`, `base`, `small` ou `medium` para escolher o modelo. `--limpar-cacoetes` remove apenas cacoetes comuns no início dos trechos; por padrão, nenhuma fala é descartada.
+
+O app tenta primeiro obter as legendas disponíveis com `youtube-transcript-api`, priorizando português e inglês. Se não houver legendas acessíveis, baixa apenas o áudio com `yt-dlp` e transcreve com `faster-whisper`. O modelo de fala é baixado automaticamente na primeira vez em que o fallback é usado. O padrão `small` oferece um equilíbrio entre velocidade e qualidade. `tiny` e `base` são mais rápidos; `medium` costuma ser mais preciso e exige mais memória. A detecção do idioma no Whisper é automática. O processo pode demorar em vídeos longos.
+
+O `.md` contém link, duração e todos os trechos de fala com marcas de tempo clicáveis. Em playlists, o título de cada vídeo é usado no arquivo; num link individual processado só pelas legendas, o ID é usado como título. Cada execução cria um novo arquivo, sem sobrescrever um anterior. O áudio temporário é removido ao terminar. Se um vídeo da playlist falhar, o app segue para o próximo e apresenta as falhas no fim.
+
+Vídeos privados, com restrição regional ou indisponíveis para download podem falhar. A precisão depende das legendas ou da qualidade do áudio. Use o app apenas com vídeos cujo conteúdo você tem permissão para acessar e transcrever.
+
+## Desenvolvimento
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe app.py
+python -m unittest discover -s tests -v
+```
