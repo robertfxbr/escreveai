@@ -1,4 +1,4 @@
-"""Windows desktop interface for YouTube-to-Markdown transcription."""
+"""Windows desktop interface for transcription and video downloads."""
 
 from __future__ import annotations
 
@@ -9,17 +9,20 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from downloader import DownloadCancelled, download_video, validate_media_url
 from transcriber import BatchResult, transcribe_url
 
 
 class TranscriptionApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("YouTube para Markdown")
-        self.root.geometry("660x620")
-        self.root.minsize(560, 590)
+        self.root.title("EscreveAI")
+        self.root.geometry("680x750")
+        self.root.minsize(560, 720)
         self.root.configure(bg="#f5f7fb")
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.cancel_event = threading.Event()
+        self.mode = tk.StringVar(value="transcribe")
         self.url = tk.StringVar()
         self.folder = tk.StringVar()
         self.cookies = tk.StringVar()
@@ -32,6 +35,7 @@ class TranscriptionApp:
         self.status = tk.StringVar(value="Pronto para transcrever.")
         self.result_path: Path | None = None
         self._build()
+        self._update_mode()
         self.root.after(100, self._process_events)
 
     def _build(self) -> None:
@@ -48,25 +52,38 @@ class TranscriptionApp:
 
         main = ttk.Frame(self.root, padding=24)
         main.pack(fill="both", expand=True)
-        ttk.Label(main, text="YouTube → Markdown", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(main, text="EscreveAI", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
-            main, text="Cole um vídeo ou playlist e salve um .md por vídeo na pasta escolhida.",
+            main, text="Transcreva vídeos do YouTube ou baixe vídeos de sites compatíveis.",
             style="Hint.TLabel",
-        ).pack(anchor="w", pady=(3, 21))
+        ).pack(anchor="w", pady=(3, 13))
 
-        ttk.Label(main, text="Link do vídeo ou playlist").pack(anchor="w")
+        mode_row = ttk.Frame(main)
+        mode_row.pack(fill="x", pady=(0, 15))
+        self.mode_buttons = [
+            ttk.Radiobutton(mode_row, text="Transcrever YouTube", variable=self.mode,
+                            value="transcribe", command=self._update_mode),
+            ttk.Radiobutton(mode_row, text="Baixar vídeo", variable=self.mode,
+                            value="download", command=self._update_mode),
+        ]
+        for button in self.mode_buttons:
+            button.pack(side="left", padx=(0, 16))
+
+        self.url_label = ttk.Label(main, text="Link do vídeo ou playlist")
+        self.url_label.pack(anchor="w")
         self.url_entry = ttk.Entry(main, textvariable=self.url)
         self.url_entry.pack(fill="x", pady=(5, 16))
         self.url_entry.focus_set()
 
-        ttk.Label(main, text="Pasta para salvar o .md").pack(anchor="w")
+        self.folder_label = ttk.Label(main, text="Pasta para salvar o .md")
+        self.folder_label.pack(anchor="w")
         folder_row = ttk.Frame(main)
         folder_row.pack(fill="x", pady=(5, 16))
         ttk.Entry(folder_row, textvariable=self.folder).pack(side="left", fill="x", expand=True)
         self.browse_button = ttk.Button(folder_row, text="Selecionar...", command=self._choose_folder)
         self.browse_button.pack(side="left", padx=(8, 0))
 
-        ttk.Label(main, text="Cookies do YouTube (opcional, para vídeos que exigem login)").pack(anchor="w")
+        ttk.Label(main, text="Arquivo cookies.txt do site (opcional, para vídeos que exigem login)").pack(anchor="w")
         cookie_row = ttk.Frame(main)
         cookie_row.pack(fill="x", pady=(5, 16))
         self.cookie_entry = ttk.Entry(cookie_row, textvariable=self.cookies)
@@ -74,7 +91,9 @@ class TranscriptionApp:
         self.cookie_browse_button = ttk.Button(cookie_row, text="Selecionar...", command=self._choose_cookies)
         self.cookie_browse_button.pack(side="left", padx=(8, 0))
 
-        options = ttk.Frame(main)
+        self.transcription_options = ttk.Frame(main)
+        self.transcription_options.pack(fill="x")
+        options = ttk.Frame(self.transcription_options)
         options.pack(fill="x")
         ttk.Label(options, text="Modelo de transcrição").pack(side="left")
         self.model_box = ttk.Combobox(
@@ -85,23 +104,23 @@ class TranscriptionApp:
         ttk.Label(options, text="small: equilíbrio entre velocidade e qualidade", style="Hint.TLabel").pack(side="left")
 
         self.whisper_checkbox = ttk.Checkbutton(
-            main, text="Usar sempre Whisper (mais lento)", variable=self.force_whisper,
+            self.transcription_options, text="Usar sempre Whisper (mais lento)", variable=self.force_whisper,
         )
         self.whisper_checkbox.pack(anchor="w", pady=(12, 0))
         self.fillers_checkbox = ttk.Checkbutton(
-            main, text="Remover cacoetes iniciais comuns", variable=self.remove_fillers,
+            self.transcription_options, text="Remover cacoetes iniciais comuns", variable=self.remove_fillers,
         )
         self.fillers_checkbox.pack(anchor="w", pady=(3, 0))
         self.visual_checkbox = ttk.Checkbutton(
-            main, text="Adicionar contexto visual com Gemini (opcional)", variable=self.visual_mode,
+            self.transcription_options, text="Adicionar contexto visual com Gemini (opcional)", variable=self.visual_mode,
         )
         self.visual_checkbox.pack(anchor="w", pady=(3, 0))
-        ttk.Label(main, text="Chave Gemini API (ou defina GEMINI_API_KEY)", style="Hint.TLabel").pack(
+        ttk.Label(self.transcription_options, text="Chave Gemini API (ou defina GEMINI_API_KEY)", style="Hint.TLabel").pack(
             anchor="w", pady=(8, 2)
         )
-        self.key_entry = ttk.Entry(main, textvariable=self.api_key, show="•")
+        self.key_entry = ttk.Entry(self.transcription_options, textvariable=self.api_key, show="•")
         self.key_entry.pack(fill="x")
-        limit_row = ttk.Frame(main)
+        limit_row = ttk.Frame(self.transcription_options)
         limit_row.pack(fill="x", pady=(6, 0))
         ttk.Label(limit_row, text="Vídeos novos por execução (modo visual)", style="Hint.TLabel").pack(side="left")
         self.limit_box = ttk.Spinbox(limit_row, from_=1, to=100, textvariable=self.visual_limit, width=5)
@@ -109,16 +128,34 @@ class TranscriptionApp:
 
         actions = ttk.Frame(main)
         actions.pack(fill="x", pady=(23, 12))
+        self.actions = actions
         self.start_button = ttk.Button(
             actions, text="Transcrever", style="Accent.TButton", command=self._start,
         )
         self.start_button.pack(side="left")
+        self.cancel_button = ttk.Button(
+            actions, text="Cancelar", command=self._cancel, state="disabled",
+        )
+        self.cancel_button.pack(side="left", padx=(9, 0))
         self.open_button = ttk.Button(actions, text="Abrir resultado", command=self._open_result, state="disabled")
         self.open_button.pack(side="left", padx=(9, 0))
 
         self.progress = ttk.Progressbar(main, mode="indeterminate")
         self.progress.pack(fill="x")
         ttk.Label(main, textvariable=self.status, wraplength=600).pack(anchor="w", pady=(9, 0))
+
+    def _update_mode(self) -> None:
+        if self.mode.get() == "download":
+            self.url_label.configure(text="Link do vídeo")
+            self.folder_label.configure(text="Pasta para salvar o vídeo")
+            self.start_button.configure(text="Baixar vídeo")
+            self.transcription_options.pack_forget()
+        else:
+            self.url_label.configure(text="Link do vídeo ou playlist do YouTube")
+            self.folder_label.configure(text="Pasta para salvar o .md")
+            self.start_button.configure(text="Transcrever")
+            if not self.transcription_options.winfo_manager():
+                self.transcription_options.pack(fill="x", before=self.actions)
 
     def _choose_folder(self) -> None:
         chosen = filedialog.askdirectory(parent=self.root, title="Selecione a pasta de destino")
@@ -127,7 +164,7 @@ class TranscriptionApp:
 
     def _choose_cookies(self) -> None:
         chosen = filedialog.askopenfilename(
-            parent=self.root, title="Selecione o cookies.txt do YouTube",
+            parent=self.root, title="Selecione o cookies.txt do site",
             filetypes=(("Arquivos de texto", "*.txt"), ("Todos os arquivos", "*.*")),
         )
         if chosen:
@@ -137,7 +174,7 @@ class TranscriptionApp:
         url = self.url.get().strip()
         folder = Path(self.folder.get().strip())
         if not url:
-            messagebox.showerror("Link ausente", "Cole o link de um vídeo ou playlist do YouTube.", parent=self.root)
+            messagebox.showerror("Link ausente", "Cole um link de vídeo.", parent=self.root)
             return
         if not self.folder.get().strip() or not folder.is_dir():
             messagebox.showerror("Pasta ausente", "Selecione uma pasta de destino existente.", parent=self.root)
@@ -146,17 +183,28 @@ class TranscriptionApp:
         if cookie_file and not Path(cookie_file).is_file():
             messagebox.showerror("Cookies ausentes", "Selecione um arquivo cookies.txt existente.", parent=self.root)
             return
-        if self.visual_mode.get() and not (self.api_key.get().strip() or os.environ.get("GEMINI_API_KEY")):
+        downloading = self.mode.get() == "download"
+        if downloading:
+            try:
+                validate_media_url(url)
+            except ValueError as exc:
+                messagebox.showerror("Link inválido", str(exc), parent=self.root)
+                return
+        if not downloading and self.visual_mode.get() and not (self.api_key.get().strip() or os.environ.get("GEMINI_API_KEY")):
             messagebox.showerror(
                 "Chave ausente", "Informe uma chave Gemini API ou defina GEMINI_API_KEY.", parent=self.root,
             )
             return
-        if self.visual_mode.get() and self.visual_limit.get() < 1:
+        if not downloading and self.visual_mode.get() and self.visual_limit.get() < 1:
             messagebox.showerror("Limite inválido", "Use pelo menos 1 vídeo por execução.", parent=self.root)
             return
         self.result_path = None
+        self.cancel_event.clear()
         self.open_button.configure(state="disabled")
         self.start_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal" if downloading else "disabled")
+        for button in self.mode_buttons:
+            button.configure(state="disabled")
         self.browse_button.configure(state="disabled")
         self.cookie_entry.configure(state="disabled")
         self.cookie_browse_button.configure(state="disabled")
@@ -168,13 +216,34 @@ class TranscriptionApp:
         self.limit_box.configure(state="disabled")
         self.progress.start(12)
         self.status.set("Iniciando...")
-        threading.Thread(
-            target=self._run,
-            args=(url, folder, self.model.get(), self.force_whisper.get(),
-                  self.remove_fillers.get(), self.visual_mode.get(), self.api_key.get().strip(),
-                  self.visual_limit.get(), cookie_file),
-            daemon=True,
-        ).start()
+        if downloading:
+            target = self._run_download
+            args = (url, folder, cookie_file)
+        else:
+            target = self._run
+            args = (url, folder, self.model.get(), self.force_whisper.get(),
+                    self.remove_fillers.get(), self.visual_mode.get(), self.api_key.get().strip(),
+                    self.visual_limit.get(), cookie_file)
+        threading.Thread(target=target, args=args, daemon=True).start()
+
+    def _cancel(self) -> None:
+        self.cancel_event.set()
+        self.cancel_button.configure(state="disabled")
+        self.status.set("Cancelando download...")
+
+    def _run_download(self, url: str, folder: Path, cookie_file: str) -> None:
+        try:
+            path = download_video(
+                url, folder, lambda message: self.events.put(("status", message)),
+                cookie_file=Path(cookie_file) if cookie_file else None,
+                cancel_event=self.cancel_event,
+            )
+        except DownloadCancelled:
+            self.events.put(("download_cancelled", None))
+        except Exception as exc:
+            self.events.put(("error", str(exc)))
+        else:
+            self.events.put(("download_done", path))
 
     def _run(
         self, url: str, folder: Path, model: str, force_whisper: bool,
@@ -213,8 +282,17 @@ class TranscriptionApp:
                     self.status.set(str(payload))
                 elif kind == "error":
                     self._finish()
-                    self.status.set("Não foi possível concluir a transcrição.")
-                    messagebox.showerror("Erro na transcrição", str(payload), parent=self.root)
+                    self.status.set("Não foi possível concluir o processamento.")
+                    messagebox.showerror("Erro no processamento", str(payload), parent=self.root)
+                elif kind == "download_cancelled":
+                    self._finish()
+                    self.status.set("Download cancelado. Você pode tentar novamente para retomar.")
+                elif kind == "download_done":
+                    self._finish()
+                    self.result_path = Path(payload)
+                    self.open_button.configure(state="normal")
+                    self.status.set(f"Vídeo salvo: {self.result_path.name}")
+                    messagebox.showinfo("Download concluído", str(self.result_path), parent=self.root)
                 elif kind == "done":
                     self._finish()
                     result: BatchResult = payload
@@ -239,6 +317,9 @@ class TranscriptionApp:
     def _finish(self) -> None:
         self.progress.stop()
         self.start_button.configure(state="normal")
+        self.cancel_button.configure(state="disabled")
+        for button in self.mode_buttons:
+            button.configure(state="normal")
         self.browse_button.configure(state="normal")
         self.cookie_entry.configure(state="normal")
         self.cookie_browse_button.configure(state="normal")
