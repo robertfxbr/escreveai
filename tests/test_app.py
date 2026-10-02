@@ -10,20 +10,24 @@ from app import TranscriptionApp
 
 class AppCancellationTests(unittest.TestCase):
     def test_cancel_button_requests_stop(self):
-        status = SimpleNamespace(set=lambda value: updates.append(value))
-        button = SimpleNamespace(configure=lambda **kwargs: states.append(kwargs["state"]))
-        updates = []
-        states = []
-        app = TranscriptionApp.__new__(TranscriptionApp)
-        app.cancel_event = threading.Event()
-        app.status = status
-        app.cancel_button = button
+        for mode, expected in (("transcribe", "etapa atual"), ("download", "download")):
+            with self.subTest(mode=mode):
+                status = SimpleNamespace(set=lambda value: updates.append(value))
+                button = SimpleNamespace(configure=lambda **kwargs: states.append(kwargs["state"]))
+                updates = []
+                states = []
+                app = TranscriptionApp.__new__(TranscriptionApp)
+                app.cancel_event = threading.Event()
+                app.mode = SimpleNamespace(get=lambda: mode)
+                app.status = status
+                app.cancel_button = button
 
-        app._cancel()
+                app._cancel()
 
-        self.assertTrue(app.cancel_event.is_set())
-        self.assertEqual(states, ["disabled"])
-        self.assertIn("Cancelando", updates[0])
+                self.assertTrue(app.cancel_event.is_set())
+                self.assertEqual(states, ["disabled"])
+                self.assertIn("Cancelando", updates[0])
+                self.assertIn(expected, updates[0])
 
     def test_worker_passes_cancel_event_to_pipeline(self):
         app = TranscriptionApp.__new__(TranscriptionApp)

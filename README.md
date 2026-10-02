@@ -1,12 +1,12 @@
-# YouTube para Markdown
+# EscreveAI
 
-App local para transcrever vídeos ou playlists do YouTube e salvar um Markdown por vídeo na pasta escolhida. Pode ser usado pela janela ou pelo terminal.
+App local para transcrever vídeos ou playlists do YouTube em Markdown e para baixar vídeos de sites compatíveis com `yt-dlp`. Pode ser usado pela janela ou pelo terminal.
 
 ## Iniciar no Windows
 
 1. Tenha Python 3.10 ou superior e Node.js instalados. Deixe os dois disponíveis no `PATH`. FFmpeg também é recomendado para formatos de áudio que precisam de pós-processamento.
 2. Dê dois cliques em `iniciar.bat`. Na primeira execução, o script cria `.venv` e instala as dependências. Nas seguintes, só reinstala se os arquivos de requisitos mudarem.
-3. Cole o link de um vídeo ou playlist, selecione a pasta e clique em **Transcrever**.
+3. Escolha **Transcrever YouTube** ou **Baixar vídeo**, cole o link e selecione a pasta de destino.
 
 ## Usar pelo terminal
 
@@ -18,7 +18,19 @@ Após executar `iniciar.bat` uma vez para instalar as dependências:
 
 Para um vídeo só, passe o link dele no lugar da playlist. Sem argumentos, o comando pede o link e salva na pasta atual. Use `--whisper` para transcrever diretamente o áudio, mesmo quando existem legendas. Use `--modelo tiny`, `base`, `small` ou `medium` para escolher o modelo. `--limpar-cacoetes` remove apenas cacoetes comuns no início dos trechos; por padrão, nenhuma fala é descartada.
 
-Se o YouTube exigir login para baixar o áudio, exporte apenas os cookies de `youtube.com` em formato Netscape `cookies.txt` seguindo a [FAQ do yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp). Selecione o arquivo no campo **Cookies do YouTube** da janela ou informe `--cookies "C:\Caminho\cookies.txt"` no terminal. Guarde esse arquivo fora do repositório e da pasta de transcrições; ele contém dados de sessão da sua conta. O app também tenta uma rota alternativa de áudio quando a rota padrão falha.
+## Baixar vídeos de outros sites
+
+Selecione **Baixar vídeo** na janela ou use o terminal:
+
+```powershell
+.\.venv\Scripts\python.exe baixar.py "https://exemplo.com/video" --pasta "C:\Caminho\Dos\Videos"
+```
+
+Essa modalidade salva **um vídeo por URL**, com vídeo e áudio na melhor qualidade que o site disponibilizar. O formato final pode ser `.mp4`, `.webm` ou outro contêiner; instale FFmpeg para permitir a união de faixas separadas de vídeo e áudio. Downloads parciais podem ser retomados ao executar novamente com o mesmo link e pasta. Há progresso e botão **Cancelar** na janela.
+
+O `yt-dlp` oferece [extratores para muitos sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md) e também tenta URLs não listadas. O suporte precisa ser testado em cada site; vídeos com DRM, restrições de acesso ou login podem falhar. Para sites que exigem login, selecione um `cookies.txt` da sua sessão no campo opcional ou use `--cookies "C:\Caminho\cookies.txt"`. Guarde esse arquivo fora do repositório: ele contém dados de sessão. A modalidade de transcrição continua restrita ao YouTube.
+
+Se o YouTube exigir login para baixar o áudio, exporte apenas os cookies de `youtube.com` em formato Netscape `cookies.txt` seguindo a [FAQ do yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp). Selecione o arquivo no campo **Arquivo cookies.txt do site** da janela ou informe `--cookies "C:\Caminho\cookies.txt"` no terminal. Guarde esse arquivo fora do repositório e da pasta de transcrições; ele contém dados de sessão da sua conta. O app também tenta uma rota alternativa de áudio quando a rota padrão falha.
 
 ## Contexto visual opcional
 
