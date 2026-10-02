@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Callable
 
-from transcriber import video_id_from_url
+from transcriber import TranscriptionCancelled, video_id_from_url
 
 
 MODEL = "gemini-3.8-flash"
@@ -34,9 +35,15 @@ def analyze_with_gemini(
     *,
     client_factory: Callable | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    timeout_seconds: float = 3600,
+    cancel_event: threading.Event | None = None,
 ) -> str:
     if not api_key:
         raise ValueError("Defina GEMINI_API_KEY para usar contexto visual.")
+    if timeout_seconds <= 0:
+        raise ValueError("O tempo limite da análise visual deve ser positivo.")
+    started_at = clock()
     if client_factory is None:
         try:
             from google import genai
@@ -77,7 +84,13 @@ def analyze_with_gemini(
         )
 
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            raise TranscriptionCancelled("Análise visual cancelada pelo usuário.")
+        if clock() - started_at >= timeout_seconds:
+            raise TimeoutError("A análise visual excedeu o tempo limite; execute novamente para retomar.")
         interaction = client.interactions.get(job_id)
+        if cancel_event is not None and cancel_event.is_set():
+            raise TranscriptionCancelled("Análise visual cancelada pelo usuário.")
         state = _status_value(interaction.status)
         if state == "completed":
             notes = (interaction.output_text or "").strip()
@@ -96,4 +109,7 @@ def analyze_with_gemini(
         if state != "in_progress":
             raise RuntimeError(f"Análise visual pausada com estado inesperado: {state}")
         status(f"Análise visual do vídeo {video_id} em andamento...")
-        sleep(10)
+        if cancel_event is not None:
+            cancel_event.wait(10)
+        else:
+            sleep(10)

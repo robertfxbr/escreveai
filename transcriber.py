@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import threading
 from html import unescape
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,12 +30,22 @@ class BatchResult:
     saved: list[Path]
     failed: list[tuple[str, str]]
     skipped: list[Path] = field(default_factory=list)
+    cancelled: bool = False
 
 
 @dataclass(frozen=True)
 class PlaylistVideo:
     url: str
     title: str
+
+
+class TranscriptionCancelled(Exception):
+    """The user asked to stop after the current safe checkpoint."""
+
+
+def _check_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise TranscriptionCancelled("Processamento cancelado pelo usuário.")
 
 
 def validate_youtube_url(url: str) -> str:
@@ -89,12 +100,11 @@ def render_markdown(
     lines.append(f"**Origem da transcrição:** {info.method}")
     lines.extend(["", "## Transcrição", ""])
     count = 0
-    previous = ""
     for segment in segments:
         speech = " ".join(unescape(str(segment.text)).split())
         if remove_fillers:
             speech = re.sub(r"(?i)^(?:(?:ahn+|hã+|éé+|uh+)[,.;:\s]+)+", "", speech).strip()
-        if not speech or speech.casefold() == previous:
+        if not speech:
             continue
         seconds = max(0, int(segment.start))
         stamp = format_timestamp(seconds)
@@ -102,7 +112,6 @@ def render_markdown(
         lines.append(f"[{stamp}]({link}) {speech}")
         lines.append("")
         count += 1
-        previous = speech.casefold()
     if count == 0:
         raise ValueError("Nenhuma fala foi detectada neste vídeo.")
     return "\n".join(lines).rstrip() + "\n"
@@ -189,7 +198,10 @@ def fetch_captions(url: str, status: Status) -> tuple[VideoInfo, list[object]]:
     return info, fetched
 
 
-def download_audio(url: str, temp_dir: Path, status: Status) -> tuple[VideoInfo, Path]:
+def download_audio(
+    url: str, temp_dir: Path, status: Status,
+    cancel_event: threading.Event | None = None,
+) -> tuple[VideoInfo, Path]:
     try:
         from yt_dlp import YoutubeDL
     except ImportError as exc:
@@ -205,6 +217,8 @@ def download_audio(url: str, temp_dir: Path, status: Status) -> tuple[VideoInfo,
         "noprogress": True,
         "js_runtimes": {"node": {}},
     }
+    if cancel_event is not None:
+        options["progress_hooks"] = [lambda _: _check_cancelled(cancel_event)]
     cookie_file = os.environ.get("YOUTUBE_COOKIES_FILE")
     if cookie_file:
         if not Path(cookie_file).is_file():
@@ -214,13 +228,17 @@ def download_audio(url: str, temp_dir: Path, status: Status) -> tuple[VideoInfo,
     try:
         with YoutubeDL(options) as ydl:
             data = ydl.extract_info(url, download=True)
+    except TranscriptionCancelled:
+        raise
     except Exception:
+        _check_cancelled(cancel_event)
         status("Tentando rota alternativa de áudio do YouTube...")
         options["extractor_args"] = {"youtube": {"player_client": ["android"]}}
         options["outtmpl"] = str(temp_dir / "audio-fallback.%(ext)s")
         stem = "audio-fallback"
         with YoutubeDL(options) as ydl:
             data = ydl.extract_info(url, download=True)
+    _check_cancelled(cancel_event)
     if not data or data.get("_type") == "playlist":
         raise ValueError("O link não retornou um vídeo individual.")
     files = [path for path in temp_dir.glob(f"{stem}.*") if path.is_file() and not path.name.endswith(".part")]
@@ -235,7 +253,10 @@ def download_audio(url: str, temp_dir: Path, status: Status) -> tuple[VideoInfo,
     return info, files[0]
 
 
-def transcribe_audio(audio: Path, model_name: str, status: Status) -> list[object]:
+def transcribe_audio(
+    audio: Path, model_name: str, status: Status,
+    cancel_event: threading.Event | None = None,
+) -> list[object]:
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc:
@@ -248,6 +269,7 @@ def transcribe_audio(audio: Path, model_name: str, status: Status) -> list[objec
     result = []
     last_reported = -1
     for piece in pieces:
+        _check_cancelled(cancel_event)
         result.append(piece)
         minute = int(piece.end // 60)
         if minute > last_reported:
@@ -268,6 +290,7 @@ def transcribe_video(
     force_whisper: bool = False,
     remove_fillers: bool = False,
     title_hint: str | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Path:
     url = validate_youtube_url(url)
     if is_playlist_url(url):
@@ -282,21 +305,34 @@ def transcribe_video(
     transcribe = transcriber or transcribe_audio
     captions = caption_fetcher or fetch_captions
 
+    _check_cancelled(cancel_event)
     content = None
     if not force_whisper:
         try:
             info, segments = captions(url, report)
+            _check_cancelled(cancel_event)
             if title_hint:
                 info = VideoInfo(title_hint, info.url, info.video_id, info.duration, info.method)
             content = render_markdown(info, segments, remove_fillers=remove_fillers)
+        except TranscriptionCancelled:
+            raise
         except Exception as exc:
             report(f"Legendas indisponíveis ({exc}). Usando Whisper local...")
     if content is None:
         with tempfile.TemporaryDirectory(prefix="youtube-transcricao-") as name:
-            info, audio = download(url, Path(name), report)
-            segments = transcribe(audio, model_name, report)
+            info, audio = (
+                download_audio(url, Path(name), report, cancel_event)
+                if downloader is None else download(url, Path(name), report)
+            )
+            _check_cancelled(cancel_event)
+            segments = (
+                transcribe_audio(audio, model_name, report, cancel_event)
+                if transcriber is None else transcribe(audio, model_name, report)
+            )
+            _check_cancelled(cancel_event)
             content = render_markdown(info, segments, remove_fillers=remove_fillers)
 
+    _check_cancelled(cancel_event)
     stem = safe_filename(info.title, info.video_id)
     for suffix in range(1, 10000):
         filename = f"{stem}.md" if suffix == 1 else f"{stem} ({suffix}).md"
@@ -313,24 +349,27 @@ def transcribe_video(
     raise RuntimeError("Há arquivos demais com esse título na pasta selecionada.")
 
 
-def existing_transcript(output_dir: Path, video_id: str) -> Path | None:
-    ending = re.compile(rf"\[{re.escape(video_id)}\](?: \(\d+\))?\.md$")
-    files = [path for path in output_dir.glob("*.md") if ending.search(path.name)]
-    if files:
-        return max(files, key=lambda path: path.stat().st_mtime)
-    source = re.compile(
-        rf"^\*\*Fonte:\*\* https://www\.youtube\.com/watch\?v={re.escape(video_id)}(?:\s|&|$)",
-        re.MULTILINE,
-    )
-    for path in output_dir.glob("*.md"):
+def _transcript_index(output_dir: Path) -> dict[str, Path]:
+    found: dict[str, Path] = {}
+    for path in Path(output_dir).glob("*.md"):
         try:
             with path.open("r", encoding="utf-8") as file:
-                header = file.read(1024)
-        except (OSError, UnicodeError):
+                header = file.read(4096)
+            if not re.search(r"(?m)^## Transcrição\s*$", header):
+                continue
+            source = re.search(r"(?m)^\*\*Fonte:\*\*\s+(\S+)\s*$", header)
+            if source is None:
+                continue
+            video_id = video_id_from_url(source.group(1))
+            if video_id not in found or path.stat().st_mtime > found[video_id].stat().st_mtime:
+                found[video_id] = path
+        except (OSError, UnicodeError, ValueError, KeyError, IndexError):
             continue
-        if source.search(header) and "## Transcrição" in header:
-            return path
-    return None
+    return found
+
+
+def existing_transcript(output_dir: Path, video_id: str) -> Path | None:
+    return _transcript_index(output_dir).get(video_id)
 
 
 def visual_notes_to_markdown(notes: str, video_id: str) -> str:
@@ -373,18 +412,20 @@ def transcribe_with_vision(
     force_whisper: bool,
     remove_fillers: bool,
     title_hint: str | None,
+    existing: Path | None,
+    cancel_event: threading.Event | None,
 ) -> Path:
     key = api_key or os.environ.get("GEMINI_API_KEY")
     if visual_analyzer is None and not key:
         raise ValueError("Defina GEMINI_API_KEY ou informe a chave no app para usar contexto visual.")
     video_id = video_id_from_url(url)
-    existing = existing_transcript(output_dir, video_id)
     if existing is None:
         existing = transcribe_video(
             url, output_dir, model_name, report,
             caption_fetcher=caption_fetcher, downloader=downloader,
             transcriber=transcriber, force_whisper=force_whisper,
             remove_fillers=remove_fillers, title_hint=title_hint,
+            cancel_event=cancel_event,
         )
     content = existing.read_text(encoding="utf-8")
     if "\n## Contexto visual\n" in content:
@@ -393,10 +434,19 @@ def transcribe_with_vision(
 
     if visual_analyzer is None:
         from vision import analyze_with_gemini
-        visual_analyzer = analyze_with_gemini
+        visual_analyzer = lambda url, folder, status, key: analyze_with_gemini(
+            url, folder, status, key, cancel_event=cancel_event,
+        )
+    _check_cancelled(cancel_event)
     report(f"Analisando imagens do vídeo {video_id}...")
     notes = visual_analyzer(url, output_dir, report, key)
+    _check_cancelled(cancel_event)
     addition = visual_notes_to_markdown(notes, video_id)
+    # Preserve edits made while the Gemini job was running.
+    content = existing.read_text(encoding="utf-8")
+    if "\n## Contexto visual\n" in content:
+        report(f"Contexto visual já concluído para {video_id}; pulando.")
+        return existing
     with tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", newline="\n", suffix=".tmp",
         prefix="escreveai-", dir=output_dir, delete=False,
@@ -404,6 +454,8 @@ def transcribe_with_vision(
         temporary = Path(file.name)
         file.write(content.rstrip() + "\n" + addition)
     try:
+        if existing.read_text(encoding="utf-8") != content:
+            raise RuntimeError("A nota mudou durante a gravação; execute novamente para preservar as edições.")
         os.replace(temporary, existing)
     except Exception:
         temporary.unlink(missing_ok=True)
@@ -428,20 +480,28 @@ def transcribe_url(
     visual_analyzer: Callable | None = None,
     api_key: str | None = None,
     max_new_videos: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> BatchResult:
     url = validate_youtube_url(url)
     if max_new_videos is not None and max_new_videos < 0:
         raise ValueError("O limite de vídeos deve ser zero ou maior.")
     report = status or (lambda _: None)
     urls = (playlist_fetcher or fetch_playlist_urls)(url, report) if is_playlist_url(url) else [url]
+    transcripts = _transcript_index(Path(output_dir))
     saved: list[Path] = []
     failed: list[tuple[str, str]] = []
     skipped: list[Path] = []
     attempted = 0
+    cancelled = False
     for index, video in enumerate(urls, 1):
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
+            report("Processamento cancelado pelo usuário.")
+            break
         video_url = video.url if isinstance(video, PlaylistVideo) else video
         title_hint = video.title if isinstance(video, PlaylistVideo) else None
-        prior = existing_transcript(Path(output_dir), video_id_from_url(video_url))
+        video_id = video_id_from_url(video_url)
+        prior = transcripts.get(video_id)
         if prior and (not visual_mode or "\n## Contexto visual\n" in prior.read_text(encoding="utf-8")):
             saved.append(prior)
             skipped.append(prior)
@@ -464,6 +524,7 @@ def transcribe_url(
                     caption_fetcher=caption_fetcher, downloader=downloader,
                     transcriber=transcriber, force_whisper=force_whisper,
                     remove_fillers=remove_fillers, title_hint=title_hint,
+                    existing=prior, cancel_event=cancel_event,
                 )
             else:
                 path = transcribe_video(
@@ -471,11 +532,20 @@ def transcribe_url(
                     caption_fetcher=caption_fetcher, downloader=downloader,
                     transcriber=transcriber, force_whisper=force_whisper,
                     remove_fillers=remove_fillers, title_hint=title_hint,
+                    cancel_event=cancel_event,
                 )
+        except TranscriptionCancelled:
+            cancelled = True
+            partial = existing_transcript(Path(output_dir), video_id)
+            if partial is not None and partial not in saved:
+                saved.append(partial)
+            report("Processamento cancelado pelo usuário.")
+            break
         except Exception as exc:
             failed.append((video_url, str(exc)))
             report(f"Vídeo {index}/{len(urls)}: falhou — {exc}")
         else:
             saved.append(path)
+            transcripts[video_id] = path
             report(f"Vídeo {index}/{len(urls)}: salvo em {path.name}")
-    return BatchResult(saved, failed, skipped)
+    return BatchResult(saved, failed, skipped, cancelled)
