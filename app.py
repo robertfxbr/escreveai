@@ -20,6 +20,7 @@ class TranscriptionApp:
         self.root.minsize(560, 590)
         self.root.configure(bg="#f5f7fb")
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.cancel_event = threading.Event()
         self.url = tk.StringVar()
         self.folder = tk.StringVar()
         self.cookies = tk.StringVar()
@@ -113,6 +114,10 @@ class TranscriptionApp:
             actions, text="Transcrever", style="Accent.TButton", command=self._start,
         )
         self.start_button.pack(side="left")
+        self.cancel_button = ttk.Button(
+            actions, text="Cancelar", command=self._cancel, state="disabled",
+        )
+        self.cancel_button.pack(side="left", padx=(9, 0))
         self.open_button = ttk.Button(actions, text="Abrir resultado", command=self._open_result, state="disabled")
         self.open_button.pack(side="left", padx=(9, 0))
 
@@ -155,8 +160,10 @@ class TranscriptionApp:
             messagebox.showerror("Limite inválido", "Use pelo menos 1 vídeo por execução.", parent=self.root)
             return
         self.result_path = None
+        self.cancel_event.clear()
         self.open_button.configure(state="disabled")
         self.start_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal")
         self.browse_button.configure(state="disabled")
         self.cookie_entry.configure(state="disabled")
         self.cookie_browse_button.configure(state="disabled")
@@ -176,6 +183,11 @@ class TranscriptionApp:
             daemon=True,
         ).start()
 
+    def _cancel(self) -> None:
+        self.cancel_event.set()
+        self.cancel_button.configure(state="disabled")
+        self.status.set("Cancelando após a etapa atual...")
+
     def _run(
         self, url: str, folder: Path, model: str, force_whisper: bool,
         remove_fillers: bool, visual_mode: bool, api_key: str, visual_limit: int,
@@ -193,6 +205,7 @@ class TranscriptionApp:
                 visual_mode=visual_mode,
                 api_key=api_key,
                 max_new_videos=visual_limit if visual_mode else None,
+                cancel_event=self.cancel_event,
             )
         except Exception as exc:
             self.events.put(("error", str(exc)))
@@ -226,11 +239,13 @@ class TranscriptionApp:
                         f"{new_count} novo(s); {len(result.skipped)} já pronto(s); "
                         f"{len(result.failed)} falha(s)."
                     )
+                    if result.cancelled:
+                        summary = f"Processamento cancelado. {summary}"
                     self.status.set(summary)
                     if result.failed:
                         details = "\n".join(f"{url}: {error}" for url, error in result.failed[:5])
                         messagebox.showwarning("Processamento concluído", f"{summary}\n\n{details}", parent=self.root)
-                    else:
+                    elif not result.cancelled:
                         messagebox.showinfo("Transcrição concluída", summary, parent=self.root)
         except queue.Empty:
             pass
@@ -239,6 +254,7 @@ class TranscriptionApp:
     def _finish(self) -> None:
         self.progress.stop()
         self.start_button.configure(state="normal")
+        self.cancel_button.configure(state="disabled")
         self.browse_button.configure(state="normal")
         self.cookie_entry.configure(state="normal")
         self.cookie_browse_button.configure(state="normal")

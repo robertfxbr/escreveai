@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 import os
 from pathlib import Path
@@ -7,6 +8,7 @@ from unittest.mock import patch
 
 from transcriber import (
     PlaylistVideo,
+    TranscriptionCancelled,
     VideoInfo,
     download_audio,
     format_timestamp,
@@ -53,6 +55,34 @@ class TranscriberTests(unittest.TestCase):
             self.assertEqual(len(attempts), 2)
             self.assertEqual(attempts[0]["cookiefile"], str(cookies))
             self.assertEqual(attempts[1]["extractor_args"]["youtube"]["player_client"], ["android"])
+
+    def test_cancelling_audio_download_does_not_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event = threading.Event()
+            attempts = []
+
+            class FakeYoutubeDL:
+                def __init__(self, options):
+                    self.options = options
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    return False
+
+                def extract_info(self, url, download):
+                    attempts.append(self.options)
+                    event.set()
+                    self.options["progress_hooks"][0]({"status": "downloading"})
+
+            with patch("yt_dlp.YoutubeDL", FakeYoutubeDL):
+                with self.assertRaises(TranscriptionCancelled):
+                    download_audio(
+                        "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+                        Path(directory), lambda _: None, event,
+                    )
+            self.assertEqual(len(attempts), 1)
 
     def test_accepts_video_links_but_rejects_playlists_and_other_hosts(self):
         for url in (
@@ -166,7 +196,7 @@ class TranscriberTests(unittest.TestCase):
                 caption_fetcher=captions, downloader=unexpected, transcriber=unexpected,
             )
             content = saved.read_text(encoding="utf-8")
-            self.assertEqual(content.count("Olá pessoal"), 1)
+            self.assertEqual(content.count("Olá pessoal"), 2)
             self.assertIn("Hoje veremos Python", content)
 
     def test_can_force_whisper_even_with_captions(self):
@@ -262,6 +292,7 @@ class TranscriberTests(unittest.TestCase):
             result = transcribe_url(
                 url, folder, status=lambda _: None,
                 caption_fetcher=lambda *_: self.fail("Não deve buscar legendas de novo"),
+                downloader=lambda *_: self.fail("Não deve baixar áudio de novo"),
             )
             self.assertEqual(result.saved, [existing])
             self.assertEqual(result.skipped, [existing])
@@ -297,6 +328,126 @@ class TranscriberTests(unittest.TestCase):
             self.assertIn("## Contexto visual", content)
             self.assertIn("[00:00:30](https://www.youtube.com/watch?v=aaaaaaaaaaa&t=30s)", content)
             self.assertEqual(len(list(Path(directory).glob("*.md"))), 1)
+
+    def test_unrelated_note_with_video_id_in_name_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            url = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+            unrelated = folder / "Nota pessoal [aaaaaaaaaaa].md"
+            unrelated.write_text("Minhas anotações particulares.\n", encoding="utf-8")
+            result = transcribe_url(
+                url, folder, status=lambda _: None,
+                caption_fetcher=lambda *_: (
+                    VideoInfo("Aula", url, "aaaaaaaaaaa", 10),
+                    [SimpleNamespace(start=0, text="Fala da aula")],
+                ),
+            )
+            self.assertEqual(result.skipped, [])
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "Minhas anotações particulares.\n")
+            self.assertNotEqual(result.saved[0], unrelated)
+            self.assertIn("Fala da aula", result.saved[0].read_text(encoding="utf-8"))
+
+    def test_visual_mode_does_not_enrich_unrelated_note(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            url = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+            unrelated = folder / "Nota pessoal [aaaaaaaaaaa].md"
+            unrelated.write_text("Minhas anotações particulares.\n", encoding="utf-8")
+            result = transcribe_url(
+                url, folder, status=lambda _: None, visual_mode=True,
+                api_key="fake-test-key",
+                caption_fetcher=lambda *_: (
+                    VideoInfo("Aula", url, "aaaaaaaaaaa", 10),
+                    [SimpleNamespace(start=0, text="Fala da aula")],
+                ),
+                visual_analyzer=lambda *_: "[00:05] Slide.",
+            )
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "Minhas anotações particulares.\n")
+            self.assertNotEqual(result.saved[0], unrelated)
+            self.assertIn("## Contexto visual", result.saved[0].read_text(encoding="utf-8"))
+
+    def test_renamed_short_url_transcript_is_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            url = "https://youtu.be/aaaaaaaaaaa"
+            existing = folder / "Aula renomeada.md"
+            existing.write_text(
+                f"# Aula\n\n**Fonte:** {url}\n\n## Transcrição\n\nFala completa.\n",
+                encoding="utf-8",
+            )
+            result = transcribe_url(
+                url, folder, status=lambda _: None,
+                caption_fetcher=lambda *_: self.fail("Não deve buscar legendas de novo"),
+                downloader=lambda *_: self.fail("Não deve baixar áudio de novo"),
+            )
+            self.assertEqual(result.skipped, [existing])
+
+    def test_visual_mode_preserves_edits_made_during_analysis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            url = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+            existing = folder / "Aula [aaaaaaaaaaa].md"
+            existing.write_text(
+                f"# Aula\n\n**Fonte:** {url}\n\n## Transcrição\n\nFala completa.\n",
+                encoding="utf-8",
+            )
+
+            def analyze(*_):
+                with existing.open("a", encoding="utf-8") as file:
+                    file.write("\nEdição feita enquanto o Gemini trabalha.\n")
+                return "[00:05] Slide."
+
+            result = transcribe_url(
+                url, folder, status=lambda _: None, visual_mode=True,
+                api_key="fake-test-key", visual_analyzer=analyze,
+            )
+            content = result.saved[0].read_text(encoding="utf-8")
+            self.assertIn("Edição feita enquanto o Gemini trabalha.", content)
+            self.assertIn("## Contexto visual", content)
+
+    def test_cancellation_stops_playlist_after_completed_video(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            event = threading.Event()
+            urls = [f"https://www.youtube.com/watch?v={video_id}" for video_id in ("aaaaaaaaaaa", "bbbbbbbbbbb")]
+            visited = []
+
+            def captions(url, status):
+                visited.append(url)
+                return VideoInfo("Aula", url, url.split("v=")[1], 10), [
+                    SimpleNamespace(start=0, text="Fala completa")
+                ]
+
+            def status(message):
+                if "salvo em" in message:
+                    event.set()
+
+            result = transcribe_url(
+                "https://youtube.com/playlist?list=PLabc", folder, status=status,
+                playlist_fetcher=lambda *_: urls, caption_fetcher=captions,
+                cancel_event=event,
+            )
+            self.assertTrue(result.cancelled)
+            self.assertEqual(result.failed, [])
+            self.assertEqual(len(result.saved), 1)
+            self.assertEqual(visited, urls[:1])
+
+    def test_cancellation_before_writing_leaves_no_partial_note(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            event = threading.Event()
+            url = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+
+            def captions(url, status):
+                event.set()
+                return VideoInfo("Aula", url, "aaaaaaaaaaa", 10), [
+                    SimpleNamespace(start=0, text="Fala completa")
+                ]
+
+            result = transcribe_url(url, folder, caption_fetcher=captions, cancel_event=event)
+            self.assertTrue(result.cancelled)
+            self.assertEqual(result.failed, [])
+            self.assertEqual(list(folder.glob("*.md")), [])
 
     def test_visual_error_keeps_transcript_and_rerun_enriches_it(self):
         with tempfile.TemporaryDirectory() as directory:

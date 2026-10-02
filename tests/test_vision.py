@@ -1,9 +1,11 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 import json
 
+from transcriber import TranscriptionCancelled
 from vision import analyze_with_gemini
 
 
@@ -72,6 +74,41 @@ class VisionTests(unittest.TestCase):
             )
             self.assertIn("gráfico", again)
             self.assertEqual(interactions.get_calls, ["previous-job"])
+
+    def test_cancellation_keeps_job_for_resume(self):
+        event = threading.Event()
+
+        class PendingInteractions(FakeInteractions):
+            def get(self, job_id):
+                event.set()
+                return SimpleNamespace(id=job_id, status="in_progress")
+
+        with tempfile.TemporaryDirectory() as directory:
+            client = SimpleNamespace(interactions=PendingInteractions())
+            with self.assertRaises(TranscriptionCancelled):
+                analyze_with_gemini(
+                    "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+                    Path(directory), lambda _: None, "test-key",
+                    client_factory=lambda **_: client, cancel_event=event,
+                )
+            self.assertEqual(len(list(Path(directory).glob(".escreveai-vision-*.json"))), 1)
+
+    def test_timeout_keeps_job_for_resume(self):
+        class PendingInteractions(FakeInteractions):
+            def get(self, job_id):
+                return SimpleNamespace(id=job_id, status="in_progress")
+
+        clock = iter((0, 0, 2))
+        with tempfile.TemporaryDirectory() as directory:
+            client = SimpleNamespace(interactions=PendingInteractions())
+            with self.assertRaises(TimeoutError):
+                analyze_with_gemini(
+                    "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+                    Path(directory), lambda _: None, "test-key",
+                    client_factory=lambda **_: client, sleep=lambda _: None,
+                    clock=lambda: next(clock), timeout_seconds=1,
+                )
+            self.assertEqual(len(list(Path(directory).glob(".escreveai-vision-*.json"))), 1)
 
 
 if __name__ == "__main__":
