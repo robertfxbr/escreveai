@@ -202,7 +202,7 @@ class TranscriptionApp:
         self.cancel_event.clear()
         self.open_button.configure(state="disabled")
         self.start_button.configure(state="disabled")
-        self.cancel_button.configure(state="normal" if downloading else "disabled")
+        self.cancel_button.configure(state="normal")
         for button in self.mode_buttons:
             button.configure(state="disabled")
         self.browse_button.configure(state="disabled")
@@ -229,7 +229,10 @@ class TranscriptionApp:
     def _cancel(self) -> None:
         self.cancel_event.set()
         self.cancel_button.configure(state="disabled")
-        self.status.set("Cancelando download...")
+        if self.mode.get() == "download":
+            self.status.set("Cancelando download...")
+        else:
+            self.status.set("Cancelando após a etapa atual...")
 
     def _run_download(self, url: str, folder: Path, cookie_file: str) -> None:
         try:
@@ -262,6 +265,7 @@ class TranscriptionApp:
                 visual_mode=visual_mode,
                 api_key=api_key,
                 max_new_videos=visual_limit if visual_mode else None,
+                cancel_event=self.cancel_event,
             )
         except Exception as exc:
             self.events.put(("error", str(exc)))
@@ -304,11 +308,13 @@ class TranscriptionApp:
                         f"{new_count} novo(s); {len(result.skipped)} já pronto(s); "
                         f"{len(result.failed)} falha(s)."
                     )
+                    if result.cancelled:
+                        summary = f"Processamento cancelado. {summary}"
                     self.status.set(summary)
                     if result.failed:
                         details = "\n".join(f"{url}: {error}" for url, error in result.failed[:5])
                         messagebox.showwarning("Processamento concluído", f"{summary}\n\n{details}", parent=self.root)
-                    else:
+                    elif not result.cancelled:
                         messagebox.showinfo("Transcrição concluída", summary, parent=self.root)
         except queue.Empty:
             pass

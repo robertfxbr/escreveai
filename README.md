@@ -5,7 +5,7 @@ App local para transcrever vídeos ou playlists do YouTube em Markdown e para ba
 ## Iniciar no Windows
 
 1. Tenha Python 3.10 ou superior e Node.js instalados. Deixe os dois disponíveis no `PATH`. FFmpeg também é recomendado para formatos de áudio que precisam de pós-processamento.
-2. Dê dois cliques em `iniciar.bat`. Na primeira execução, o script cria `.venv` e instala as dependências.
+2. Dê dois cliques em `iniciar.bat`. Na primeira execução, o script cria `.venv` e instala as dependências. Nas seguintes, só reinstala se os arquivos de requisitos mudarem.
 3. Escolha **Transcrever YouTube** ou **Baixar vídeo**, cole o link e selecione a pasta de destino.
 
 ## Usar pelo terminal
@@ -45,6 +45,8 @@ O app envia o link público do vídeo ao Gemini em [modo de análise seletiva](h
 O limite padrão é de **3 vídeos novos por execução**. Para playlists longas, rode novamente nos dias seguintes: transcrições e contextos visuais já concluídos são reconhecidos e pulados, inclusive quando o arquivo mantém um nome antigo e contém o link de origem no cabeçalho. Uma análise visual em andamento pode ser retomada pelo identificador salvo na pasta. Use `--limite 0` no terminal para remover o limite por execução. Segundo a [documentação atual do Gemini](https://ai.google.dev/gemini-api/docs/video-understanding), o nível gratuito aceita até 8 horas de vídeo do YouTube por dia e apenas vídeos públicos. Limites e preços podem mudar; confira a [página de preços](https://ai.google.dev/gemini-api/docs/pricing) antes de usar um plano pago.
 
 Se a análise visual falhar, o `.md` com a transcrição permanece na pasta. Execute novamente para tentar acrescentar apenas o contexto visual. O modo de transcrição sem análise visual continua disponível sem chave de API.
+
+Durante uma execução pela janela, **Cancelar** interrompe o processamento no próximo ponto seguro. Uma transcrição já salva permanece no destino; se o Gemini já tiver iniciado a análise, o identificador do trabalho é mantido para retomada. Cada análise visual espera no máximo uma hora nesta execução e pode ser retomada depois.
 
 O app tenta primeiro obter as legendas disponíveis com `youtube-transcript-api`, priorizando português e inglês. Se não houver legendas acessíveis, baixa apenas o áudio com `yt-dlp` e transcreve com `faster-whisper`. O modelo de fala é baixado automaticamente na primeira vez em que o fallback é usado. O padrão `small` oferece um equilíbrio entre velocidade e qualidade. `tiny` e `base` são mais rápidos; `medium` costuma ser mais preciso e exige mais memória. A detecção do idioma no Whisper é automática. O processo pode demorar em vídeos longos.
 
