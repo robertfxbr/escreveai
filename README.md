@@ -26,7 +26,7 @@ Selecione **Baixar vídeo** na janela ou use o terminal:
 .\.venv\Scripts\python.exe baixar.py "https://exemplo.com/video" --pasta "C:\Caminho\Dos\Videos"
 ```
 
-Essa modalidade salva **um vídeo por URL**, com vídeo e áudio na melhor qualidade que o site disponibilizar. O formato final pode ser `.mp4`, `.webm` ou outro contêiner; instale FFmpeg para permitir a união de faixas separadas de vídeo e áudio. Downloads parciais podem ser retomados ao executar novamente com o mesmo link e pasta. Há progresso e botão **Cancelar** na janela.
+Essa modalidade salva **um vídeo por URL**, com vídeo e áudio na melhor qualidade que o site disponibilizar. O formato final pode ser `.mp4`, `.webm` ou outro contêiner; instale FFmpeg para permitir a união de faixas separadas de vídeo e áudio. Com FFmpeg instalado, vídeos que chegam em HEVC (H.265), comum no TikTok, são convertidos para H.264 na mesma resolução, para abrir no player padrão do Windows sem extensões pagas. A conversão leva alguns segundos por minuto de vídeo e gera um arquivo maior; sem FFmpeg, o vídeo é mantido em HEVC. Downloads parciais podem ser retomados ao executar novamente com o mesmo link e pasta. Há progresso e botão **Cancelar** na janela.
 
 O `yt-dlp` oferece [extratores para muitos sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md) e também tenta URLs não listadas. O suporte precisa ser testado em cada site; vídeos com DRM, restrições de acesso ou login podem falhar. Para sites que exigem login, selecione um `cookies.txt` da sua sessão no campo opcional ou use `--cookies "C:\Caminho\cookies.txt"`. Guarde esse arquivo fora do repositório: ele contém dados de sessão. A modalidade de transcrição continua restrita ao YouTube.
 

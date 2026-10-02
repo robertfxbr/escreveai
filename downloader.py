@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Callable
@@ -9,6 +12,9 @@ from urllib.parse import urlparse
 
 
 Status = Callable[[str], None]
+
+HEVC_CODECS = {"hevc", "h265"}
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 class DownloadCancelled(Exception):
@@ -105,5 +111,77 @@ def download_video(
     result = Path(filename).resolve()
     if not result.is_relative_to(output_dir.resolve()) or not result.is_file():
         raise RuntimeError("O arquivo final não foi encontrado na pasta selecionada.")
+    convert_hevc_to_h264(result, report, cancel_event)
     report(f"Vídeo salvo: {result.name}")
     return result
+
+
+def _video_codec(path: Path, ffprobe: str) -> str:
+    completed = subprocess.run(
+        [ffprobe, "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, creationflags=_NO_WINDOW,
+    )
+    return completed.stdout.strip().lower()
+
+
+def _duration_seconds(path: Path, ffprobe: str) -> float | None:
+    completed = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, creationflags=_NO_WINDOW,
+    )
+    try:
+        return float(completed.stdout.strip())
+    except ValueError:
+        return None
+
+
+def convert_hevc_to_h264(
+    path: Path, status: Status | None = None, cancel_event: threading.Event | None = None,
+) -> bool:
+    """Re-encode an HEVC video to H.264 in place so default Windows players can open it.
+
+    Returns True when the file was converted. Without FFmpeg the HEVC file is kept.
+    """
+    report = status or (lambda _: None)
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        report("FFmpeg não encontrado; o vídeo foi mantido no codec original.")
+        return False
+    if _video_codec(path, ffprobe) not in HEVC_CODECS:
+        return False
+
+    duration = _duration_seconds(path, ffprobe)
+    temporary = path.with_name(f"{path.stem}.h264-tmp{path.suffix}")
+    report("Convertendo HEVC para H.264...")
+    process = subprocess.Popen(
+        [ffmpeg, "-y", "-v", "error", "-nostats", "-progress", "pipe:1", "-i", str(path),
+         "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+         "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(temporary)],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, creationflags=_NO_WINDOW,
+    )
+    last_percent = -10
+    try:
+        for line in process.stdout:
+            if cancel_event is not None and cancel_event.is_set():
+                process.kill()
+                process.wait()
+                raise DownloadCancelled("Conversão cancelada; o vídeo original foi mantido.")
+            key, _, value = line.strip().partition("=")
+            if key == "out_time_us" and duration and value.isdigit():
+                percent = min(100, int(int(value) / 1_000_000 * 100 / duration))
+                if percent >= last_percent + 10:
+                    report(f"Convertendo para H.264... {percent}%")
+                    last_percent = percent
+        if process.wait() != 0:
+            report("O FFmpeg não conseguiu converter para H.264; o vídeo foi mantido em HEVC.")
+            return False
+        temporary.replace(path)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
+        temporary.unlink(missing_ok=True)
+    return True
